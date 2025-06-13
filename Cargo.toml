@@ -1,0 +1,62 @@
+[package]
+name = "kaiwadb-agent"
+version = "0.1.0"
+edition = "2024"
+repository = "https://github.com/kaiwadb/agent"
+license-file = "LICENSE"
+description = "KaiwaDB Agent WebSocket client"
+publish = false
+
+[dependencies]
+clap = { version = "4.5.40", features = ["derive", "env"] }
+ctrlc = "3.4.7"
+futures-util = "0.3.31"
+mongodb = "3.2.3"
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.140"
+sqlx = { version = "0.7.0", features = [
+    "runtime-tokio-rustls",
+    "postgres",
+    "mysql",
+    "sqlite",
+    "chrono",
+    "uuid",
+] }
+sqlx-pgrow-serde = "0.2.0"
+tokio = { version = "1.45.1", features = ["full"] }
+tokio-tungstenite = "0.26.2"
+
+[profile.dist]
+inherits = "release"
+lto = "thin"
+
+# Config for 'cargo dist'
+[workspace.metadata.dist]
+# The preferred cargo-dist version to use in CI (Cargo.toml SemVer syntax)
+cargo-dist-version = "0.21.1"
+# CI backends to support
+ci = "github"
+# The installers to generate for each app
+installers = ["shell", "powershell"]
+# Target platforms to build apps for (Rust target-triple syntax)
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+]
+# Path that installers should place binaries in
+install-path = "CARGO_HOME"
+# Whether to install an updater program
+install-updater = true
+# Hot fix after github depracating runner 20.04
+allow-dirty = ["ci"]
+
+[workspace.metadata.dist.github-custom-runners]
+aarch64-apple-darwin = "macos-latest"
+x86_64-apple-darwin = "macos-latest"
+x86_64-unknown-linux-gnu = "ubuntu-latest"
+x86_64-pc-windows-msvc = "windows-latest"
+
+[package.metadata.dist]
+dist = true

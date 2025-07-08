@@ -1,6 +1,6 @@
 [package]
 name = "kaiwadb-agent"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 repository = "https://github.com/kaiwadb/agent"
 license-file = "LICENSE"
@@ -49,7 +49,7 @@ targets = [
 install-path = "CARGO_HOME"
 # Whether to install an updater program
 install-updater = true
-# Hot fix after github depracating runner 20.04
+# Skip checking whether the specified configuration files are up to date
 allow-dirty = ["ci"]
 
 [workspace.metadata.dist.github-custom-runners]

@@ -22,7 +22,7 @@ const RECONNECT_DELAY: Duration = Duration::from_secs(5);
 #[command(version)]
 struct Args {
     /// WebSocket URL to connect to
-    #[arg(short, long, default_value = "ws://api.kaiwadb.com/agent/connector")]
+    #[arg(short, long, default_value = "wss://api.kaiwadb.com/agent/connector")]
     uri: String,
 
     /// Authentication token

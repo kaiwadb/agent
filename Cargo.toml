@@ -23,6 +23,7 @@ sqlx = { version = "0.7.0", features = [
     "uuid",
 ] }
 sqlx-pgrow-serde = "0.2.0"
+syntect = "5.2.0"
 tokio = { version = "1.45.1", features = ["full"] }
 tokio-tungstenite = { version = "0.26.2", features = ["native-tls"] }
 

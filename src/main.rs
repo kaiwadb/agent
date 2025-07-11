@@ -11,7 +11,10 @@ use tokio_tungstenite::{
     tungstenite::{Message, client::IntoClientRequest, http::Request},
 };
 
-use crate::communication::{AgentResult, AgentResultMsg, PayloadFromAgent};
+use crate::{
+    communication::{AgentResult, AgentResultMsg, PayloadFromAgent},
+    query::QueryOptions,
+};
 
 const HEARTBEAT_PERIOD: Duration = Duration::from_secs(15);
 const RECONNECT_DELAY: Duration = Duration::from_secs(5);
@@ -28,11 +31,24 @@ struct Args {
     /// Authentication token
     #[arg(short, long, env = "KAIWADB_AGENT_TOKEN")]
     token: String,
+
+    /// Enable rich logging with colors, syntax highlighting, and loading indicators
+    #[arg(short, long, default_value = "false")]
+    rich_logging: bool,
+
+    /// Maximum length of query results printed to stdout
+    #[arg(short = 'l', long, default_value = "2000")]
+    max_stdout_result_length: usize,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
+
+    let query_options = QueryOptions {
+        rich_logging: args.rich_logging,
+        max_stdout_result_length: args.max_stdout_result_length,
+    };
 
     println!("🚀 Starting KaiwaDB Agent");
     println!("📡 Connecting to: {}", args.uri);
@@ -43,7 +59,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .insert("Authorization", format!("Bearer {}", args.token).parse()?);
 
     loop {
-        match connect_and_handle(request.clone()).await {
+        match connect_and_handle(request.clone(), query_options.clone()).await {
             Ok(_) => {
                 println!("Connection ended normally");
                 break;
@@ -59,7 +75,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn connect_and_handle(request: Request<()>) -> Result<(), Box<dyn std::error::Error>> {
+async fn connect_and_handle(
+    request: Request<()>,
+    query_options: QueryOptions,
+) -> Result<(), Box<dyn std::error::Error>> {
     let (ws_stream, _) = connect_async(request).await?;
 
     println!("✅ Connected!");
@@ -72,7 +91,7 @@ async fn connect_and_handle(request: Request<()>) -> Result<(), Box<dyn std::err
             msg = read.next() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
-                        if let Err(e) = handle_server_message(text.to_string(), &mut write).await {
+                        if let Err(e) = handle_server_message(text.to_string(), &mut write, query_options.clone()).await {
                             println!("Error handling message: {}", e);
                         }
                     }
@@ -118,13 +137,14 @@ async fn handle_server_message(
         >,
         Message,
     >,
+    query_options: QueryOptions,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let msg: ServerCommandMsg = serde_json::from_str(&text)
         .map_err(|e| format!("Failed to parse server message: {}", e))?;
 
     match msg.payload {
         ServerCommand::Query(query) => {
-            let data = query.execute().await?;
+            let data = query.execute(query_options).await?;
             println!("Query completed successfully");
             let response = PayloadFromAgent::Result(AgentResultMsg {
                 channel: msg.channel,

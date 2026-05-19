@@ -23,6 +23,7 @@ use tokio_tungstenite::{
 use tracing::{debug, error, info, warn};
 
 use crate::communication::{ServerCommand, ServerMessage, TunnelMessage, TunnelResult};
+use crate::discovery;
 use crate::error::TunnelError;
 
 const HEARTBEAT_PERIOD: Duration = Duration::from_secs(15);
@@ -35,7 +36,7 @@ const CLOSE_CODE_EVICTED: u16 = 4001;
 
 type WsSink = SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>;
 
-pub async fn run(uri: String, token: String) -> Result<(), TunnelError> {
+pub async fn run(uri: String, token: String, no_scan: bool) -> Result<(), TunnelError> {
     let mut request = uri
         .into_client_request()
         .map_err(|e| TunnelError::Connection(format!("invalid WebSocket URI: {e}")))?;
@@ -46,7 +47,7 @@ pub async fn run(uri: String, token: String) -> Result<(), TunnelError> {
     let mut delay = INITIAL_RECONNECT_DELAY;
 
     loop {
-        match connect_and_handle(request.clone()).await {
+        match connect_and_handle(request.clone(), no_scan).await {
             Ok(SessionEnd::Normal) => {
                 info!("connection ended normally");
                 return Ok(());
@@ -73,7 +74,10 @@ enum SessionEnd {
     Evicted,
 }
 
-async fn connect_and_handle(request: Request<()>) -> Result<SessionEnd, TunnelError> {
+async fn connect_and_handle(
+    request: Request<()>,
+    no_scan: bool,
+) -> Result<SessionEnd, TunnelError> {
     let (ws_stream, _) = connect_async(request).await?;
     info!("connected");
 
@@ -99,7 +103,7 @@ async fn connect_and_handle(request: Request<()>) -> Result<SessionEnd, TunnelEr
                                 continue;
                             }
                         };
-                        spawn_handler(server_msg, out_tx.clone());
+                        spawn_handler(server_msg, out_tx.clone(), no_scan);
                     }
                     Some(Ok(Message::Ping(payload))) => {
                         if out_tx.send(Message::Pong(payload)).await.is_err() {
@@ -149,9 +153,9 @@ async fn writer_loop(mut write: WsSink, mut rx: mpsc::Receiver<Message>) {
     let _ = write.close().await;
 }
 
-fn spawn_handler(msg: ServerMessage, out_tx: mpsc::Sender<Message>) {
+fn spawn_handler(msg: ServerMessage, out_tx: mpsc::Sender<Message>, no_scan: bool) {
     tokio::spawn(async move {
-        let response = handle_server_message(msg).await;
+        let response = handle_server_message(msg, no_scan).await;
         let frame = match serde_json::to_string(&response) {
             Ok(s) => Message::Text(s.as_str().into()),
             Err(e) => {
@@ -165,7 +169,7 @@ fn spawn_handler(msg: ServerMessage, out_tx: mpsc::Sender<Message>) {
     });
 }
 
-async fn handle_server_message(msg: ServerMessage) -> TunnelMessage {
+async fn handle_server_message(msg: ServerMessage, no_scan: bool) -> TunnelMessage {
     let ServerMessage::Command { id, request } = msg;
     match request {
         ServerCommand::Query(query) => match query.execute().await {
@@ -184,5 +188,20 @@ async fn handle_server_message(msg: ServerMessage) -> TunnelMessage {
                 }
             }
         },
+        ServerCommand::Scan(req) => {
+            if no_scan {
+                info!(cmd_id = id, "rejecting scan: disabled by operator");
+                return TunnelMessage::Error {
+                    id,
+                    error: "scan disabled by operator".into(),
+                };
+            }
+            let report = discovery::scan(req).await;
+            debug!(cmd_id = id, candidates = report.candidates.len(), "scan complete");
+            TunnelMessage::Result {
+                id,
+                payload: TunnelResult::ScanResult(report),
+            }
+        }
     }
 }

@@ -1,5 +1,6 @@
 mod communication;
 mod connection;
+mod discovery;
 mod engine;
 mod error;
 mod params;
@@ -21,6 +22,11 @@ struct Args {
     /// Authentication token
     #[arg(short, long, env = "KAIWADB_TUNNEL_TOKEN")]
     token: String,
+
+    /// Disable network database discovery. When set, any Scan command from
+    /// the server is answered with an error.
+    #[arg(long, env = "KAIWADB_TUNNEL_DISABLE_SCAN")]
+    no_scan: bool,
 }
 
 #[tokio::main]
@@ -36,6 +42,6 @@ async fn main() -> Result<(), error::TunnelError> {
 
     let args = Args::parse();
 
-    info!(uri = %args.uri, "starting kaiwadb tunnel");
-    connection::run(args.uri, args.token).await
+    info!(uri = %args.uri, no_scan = args.no_scan, "starting kaiwadb tunnel");
+    connection::run(args.uri, args.token, args.no_scan).await
 }

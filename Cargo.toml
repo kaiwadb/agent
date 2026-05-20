@@ -1,6 +1,6 @@
 [package]
 name = "kaiwadb-tunnel"
-version = "0.6.1"
+version = "0.7.0"
 edition = "2024"
 repository = "https://github.com/kaiwadb/tunnel"
 license-file = "LICENSE"
@@ -30,6 +30,11 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 percent-encoding = "2"
 url = "2"
+if-addrs = "0.13"
+ipnet = "2"
+hickory-resolver = "0.24"
+procfs = { version = "0.17", default-features = false }
+resolv-conf = "0.7"
 
 [profile.dist]
 inherits = "release"

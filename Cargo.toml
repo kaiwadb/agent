@@ -1,6 +1,6 @@
 [package]
 name = "kaiwadb-tunnel"
-version = "0.6.1"
+version = "0.7.0"
 edition = "2024"
 repository = "https://github.com/kaiwadb/tunnel"
 license-file = "LICENSE"

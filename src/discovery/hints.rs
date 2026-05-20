@@ -5,11 +5,14 @@
 //! return empty on non-Linux — the rest of discovery still works.
 
 use std::collections::HashSet;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::IpAddr;
+#[cfg(target_os = "linux")]
+use std::net::Ipv4Addr;
 
 use ipnet::Ipv4Net;
 use tracing::debug;
 
+#[cfg(target_os = "linux")]
 use super::ENGINE_PORTS;
 use super::resolver;
 
@@ -87,6 +90,10 @@ pub async fn dns_label_resolve(labels: &[String], domains: &[String]) -> Vec<IpA
 
 /// Read TCP listening sockets via `procfs`. Return (port, engine) for every
 /// listener that matches one of our supported engine ports.
+///
+/// Linux-only. On other targets returns an empty vec; the orchestrator's
+/// explicit localhost probe loop still catches local DBs.
+#[cfg(target_os = "linux")]
 pub fn proc_net_listeners() -> Vec<(u16, &'static str)> {
     use procfs::net::TcpState;
     let mut ports: HashSet<u16> = HashSet::new();
@@ -109,7 +116,14 @@ pub fn proc_net_listeners() -> Vec<(u16, &'static str)> {
     out
 }
 
-/// ARP neighbours via `procfs`. Incomplete entries (flags=0) are skipped.
+#[cfg(not(target_os = "linux"))]
+pub fn proc_net_listeners() -> Vec<(u16, &'static str)> {
+    Vec::new()
+}
+
+/// ARP neighbours via `procfs`. Incomplete entries (no flags) are skipped.
+/// Linux-only; macOS/Windows return an empty vec.
+#[cfg(target_os = "linux")]
 pub fn arp_neighbours() -> Vec<IpAddr> {
     let Ok(entries) = procfs::net::arp() else {
         return vec![];
@@ -123,8 +137,14 @@ pub fn arp_neighbours() -> Vec<IpAddr> {
     out
 }
 
+#[cfg(not(target_os = "linux"))]
+pub fn arp_neighbours() -> Vec<IpAddr> {
+    Vec::new()
+}
+
 /// Default-gateway IP plus a handful of fixed offsets (operators routinely
-/// place the primary DB at `.2` or similar).
+/// place the primary DB at `.2` or similar). Linux-only.
+#[cfg(target_os = "linux")]
 pub fn gateway_ips() -> Vec<IpAddr> {
     let Ok(routes) = procfs::net::route() else {
         return vec![];
@@ -147,9 +167,15 @@ pub fn gateway_ips() -> Vec<IpAddr> {
     out
 }
 
+#[cfg(not(target_os = "linux"))]
+pub fn gateway_ips() -> Vec<IpAddr> {
+    Vec::new()
+}
+
 /// Non-default routes that point at subnets not bound directly to any NIC —
 /// typically WireGuard/OpenVPN/tunnel interfaces whose AllowedIPs only show
-/// up here.
+/// up here. Linux-only.
+#[cfg(target_os = "linux")]
 pub fn routed_subnets() -> Vec<(Ipv4Net, String)> {
     let Ok(routes) = procfs::net::route() else {
         return vec![];
@@ -172,6 +198,11 @@ pub fn routed_subnets() -> Vec<(Ipv4Net, String)> {
     }
     debug!(count = out.len(), "routed (non-default) subnets");
     out
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn routed_subnets() -> Vec<(Ipv4Net, String)> {
+    Vec::new()
 }
 
 /// Inspect environment variables that conventionally point at a DB. Best-

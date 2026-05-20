@@ -1,6 +1,6 @@
 [package]
 name = "kaiwadb-tunnel"
-version = "0.7.0"
+version = "0.7.1"
 edition = "2024"
 repository = "https://github.com/kaiwadb/tunnel"
 license-file = "LICENSE"
@@ -33,8 +33,10 @@ url = "2"
 if-addrs = "0.13"
 ipnet = "2"
 hickory-resolver = "0.24"
-procfs = { version = "0.17", default-features = false }
 resolv-conf = "0.7"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+procfs = { version = "0.17", default-features = false }
 
 [profile.dist]
 inherits = "release"

@@ -1,15 +1,17 @@
 //! Tunnel WebSocket client.
 //!
-//! - Pings the server every [`HEARTBEAT_PERIOD`] so middle-boxes (ingress,
+//! - Pings the server every [`HEARTBEAT_PERIOD`] so middleboxes (ingress,
 //!   load balancers) keep the TCP idle timer reset.
-//! - Each command from the server is processed in its own task; results
-//!   funnel back through an mpsc channel to a single writer task. This means
-//!   a slow query doesn't block other queries on the same tunnel.
+//! - Each command from the server is processed in its own task and streams
+//!   its response back as `begin` + binary chunks (each tagged with the
+//!   8-byte cmd_id header) + `end`. Multiple in-flight commands can
+//!   interleave their chunks safely.
+//! - A single writer task drains the shared mpsc into the WebSocket sink
+//!   so concurrent handlers don't race on writes.
 //! - Reconnect uses exponential backoff capped at [`MAX_RECONNECT_DELAY`].
-//!   A 4001 close (server-side eviction by a newer connection) bypasses the
-//!   normal backoff and waits [`EVICTION_BACKOFF`] before trying again, to
-//!   avoid hammering when an operator has accidentally started two tunnels
-//!   with the same id.
+//!   A 4001 close (server-side lease loss, e.g. another tunnel took over)
+//!   bypasses the normal backoff and waits [`EVICTION_BACKOFF`] before
+//!   trying again.
 
 use futures_util::{SinkExt, StreamExt, stream::SplitSink};
 use std::time::Duration;
@@ -20,18 +22,20 @@ use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async,
     tungstenite::{Message, client::IntoClientRequest, http::Request, protocol::CloseFrame},
 };
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
-use crate::communication::{ServerCommand, ServerMessage, TunnelMessage, TunnelResult};
+use crate::communication::{ServerCommand, ServerMessage, TunnelControl};
 use crate::discovery;
 use crate::error::TunnelError;
+use crate::query::stream_serializable;
 
 const HEARTBEAT_PERIOD: Duration = Duration::from_secs(15);
 const INITIAL_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
 const EVICTION_BACKOFF: Duration = Duration::from_secs(30);
 
-/// Server-defined close code: another tunnel connection took ownership.
+/// Server-defined close code: lease lost (another tunnel took over, or our
+/// presence row was swept after a network blip).
 const CLOSE_CODE_EVICTED: u16 = 4001;
 
 type WsSink = SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>;
@@ -82,8 +86,9 @@ async fn connect_and_handle(
     info!("connected");
 
     let (write, mut read) = ws_stream.split();
-    // Buffer is small; backpressure on a slow socket is fine and slows down
-    // command processing rather than blowing up memory.
+    // mpsc capacity controls per-tunnel buffering. Small enough that a
+    // slow socket applies backpressure to the producing tasks (and
+    // transitively to the upstream DB read) rather than blowing memory.
     let (out_tx, out_rx) = mpsc::channel::<Message>(32);
 
     let writer_task = tokio::spawn(writer_loop(write, out_rx));
@@ -155,53 +160,42 @@ async fn writer_loop(mut write: WsSink, mut rx: mpsc::Receiver<Message>) {
 
 fn spawn_handler(msg: ServerMessage, out_tx: mpsc::Sender<Message>, no_scan: bool) {
     tokio::spawn(async move {
-        let response = handle_server_message(msg, no_scan).await;
-        let frame = match serde_json::to_string(&response) {
-            Ok(s) => Message::Text(s.as_str().into()),
-            Err(e) => {
-                error!(error = %e, "failed to serialize tunnel response");
-                return;
+        let ServerMessage::Command { id, request } = msg;
+        // begin
+        send_control(&out_tx, &TunnelControl::Begin { id }).await;
+
+        let result = match request {
+            ServerCommand::Query(query) => query.execute_streaming(id, &out_tx).await,
+            ServerCommand::Scan(req) => {
+                if no_scan {
+                    info!(cmd_id = id, "rejecting scan: disabled by operator");
+                    Err(crate::error::TunnelError::Connection(
+                        "scan disabled by operator".into(),
+                    ))
+                } else {
+                    let report = discovery::scan(req).await;
+                    stream_serializable(&report, id, &out_tx).await
+                }
             }
         };
-        if out_tx.send(frame).await.is_err() {
-            warn!("dropping tunnel response: writer channel closed");
-        }
+
+        let end = match result {
+            Ok(()) => TunnelControl::End { id, error: None },
+            Err(e) => TunnelControl::End {
+                id,
+                error: Some(e.to_string()),
+            },
+        };
+        send_control(&out_tx, &end).await;
     });
 }
 
-async fn handle_server_message(msg: ServerMessage, no_scan: bool) -> TunnelMessage {
-    let ServerMessage::Command { id, request } = msg;
-    match request {
-        ServerCommand::Query(query) => match query.execute().await {
-            Ok(data) => {
-                debug!(cmd_id = id, "query completed");
-                TunnelMessage::Result {
-                    id,
-                    payload: TunnelResult::QueryResult(data),
-                }
-            }
-            Err(e) => {
-                warn!(cmd_id = id, error = %e, "query failed");
-                TunnelMessage::Error {
-                    id,
-                    error: e.to_string(),
-                }
-            }
-        },
-        ServerCommand::Scan(req) => {
-            if no_scan {
-                info!(cmd_id = id, "rejecting scan: disabled by operator");
-                return TunnelMessage::Error {
-                    id,
-                    error: "scan disabled by operator".into(),
-                };
-            }
-            let report = discovery::scan(req).await;
-            debug!(cmd_id = id, candidates = report.candidates.len(), "scan complete");
-            TunnelMessage::Result {
-                id,
-                payload: TunnelResult::ScanResult(report),
-            }
-        }
+async fn send_control(out_tx: &mpsc::Sender<Message>, ctrl: &TunnelControl) {
+    let Ok(frame) = serde_json::to_string(ctrl) else {
+        error!("failed to serialize control frame");
+        return;
+    };
+    if out_tx.send(Message::Text(frame.as_str().into())).await.is_err() {
+        warn!("dropping control frame: writer channel closed");
     }
 }

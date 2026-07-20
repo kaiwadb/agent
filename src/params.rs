@@ -25,6 +25,21 @@ pub enum ConnectionParams {
         #[serde(default)]
         ssl_mode: MysqlSslMode,
     },
+    /// MariaDB speaks the MySQL wire protocol and is served by the same sqlx
+    /// `mysql` driver — the query executor dispatches this variant to the
+    /// mysql handler. Modelled as a separate variant so the wire tag
+    /// (`"engine": "mariadb"`) and the backend's `engine_matches_connection`
+    /// check both remain unambiguous.
+    Mariadb {
+        host: String,
+        #[serde(default = "default_mariadb_port")]
+        port: u16,
+        username: String,
+        password: String,
+        database: String,
+        #[serde(default)]
+        ssl_mode: MysqlSslMode,
+    },
     Clickhouse {
         host: String,
         #[serde(default = "default_clickhouse_port")]
@@ -101,6 +116,7 @@ pub enum MysqlSslMode {
 
 fn default_pg_port() -> u16 { 5432 }
 fn default_mysql_port() -> u16 { 3306 }
+fn default_mariadb_port() -> u16 { 3306 }
 fn default_clickhouse_port() -> u16 { 8123 }
 fn default_mssql_port() -> u16 { 1433 }
 fn default_true() -> bool { true }

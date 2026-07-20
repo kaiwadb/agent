@@ -75,6 +75,16 @@ impl Query {
                 let value = mysql::execute(&connection, &query).await?;
                 stream_value(&value, id, out).await
             }
+            ConnectionParams::Mariadb { .. } => {
+                // MariaDB shares the MySQL wire protocol — the executor
+                // dispatches on the ConnectionParams variant internally and
+                // uses the same sqlx `mysql` driver.
+                let query: String = from_value(data)?;
+                info!("executing mariadb query");
+                debug!(query = %query);
+                let value = mysql::execute(&connection, &query).await?;
+                stream_value(&value, id, out).await
+            }
             ConnectionParams::Mssql { .. } => {
                 let query: String = from_value(data)?;
                 info!("executing mssql query");

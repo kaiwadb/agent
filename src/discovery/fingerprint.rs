@@ -10,9 +10,11 @@
 //!   (StartupMessage with bogus creds → ErrorResponse carries version).
 //!   For speed and to avoid noisy auth logs we only do the SSLRequest probe
 //!   and leave `version_hint` empty.
-//! - **MySQL**: server sends a greeting unsolicited on connect. The protocol
-//!   version byte (`0x0a`) and a null-terminated version string land in the
-//!   first few hundred bytes. Free fingerprint + version.
+//! - **MySQL / MariaDB**: server sends a greeting unsolicited on connect. The
+//!   protocol version byte (`0x0a`) and a null-terminated version string land
+//!   in the first few hundred bytes. MariaDB advertises itself in the version
+//!   string (e.g. `"5.5.5-10.11.7-MariaDB-…"`), so a single handshake
+//!   distinguishes the two. Free fingerprint + version.
 //! - **MSSQL**: send a TDS prelogin packet. Response includes version bytes
 //!   in the PRELOGIN_VERSION token.
 //! - **MongoDB**: send `OP_MSG` with a `hello` command. Response is a BSON
@@ -65,7 +67,9 @@ async fn dispatch(
 ) -> std::io::Result<(&'static str, Option<String>)> {
     match expected_engine {
         "postgres" => postgres(stream).await,
-        "mysql" => mysql(stream).await,
+        // MySQL and MariaDB share the wire protocol — one handler parses
+        // both, then reports whichever the server actually is.
+        "mysql" | "mariadb" => mysql(stream).await,
         "mssql" => mssql(stream).await,
         "mongo" => mongo(stream).await,
         "clickhouse" => clickhouse(stream, ip, port).await,
@@ -77,6 +81,7 @@ fn engine_static_name(s: &str) -> &'static str {
     match s {
         "postgres" => "postgres",
         "mysql" => "mysql",
+        "mariadb" => "mariadb",
         "mssql" => "mssql",
         "mongo" => "mongo",
         "clickhouse" => "clickhouse",
@@ -101,7 +106,11 @@ async fn postgres(mut s: TcpStream) -> std::io::Result<(&'static str, Option<Str
 async fn mysql(mut s: TcpStream) -> std::io::Result<(&'static str, Option<String>)> {
     // Read up to 256 bytes of the greeting. Layout: [3 bytes length][1 byte
     // seq id][payload]. Payload starts with protocol version byte (0x0a for
-    // protocol 10), then a null-terminated server version string.
+    // protocol 10), then a null-terminated server version string. MariaDB
+    // ≥ 10.2 prefixes the version with `5.5.5-` for compat with old MySQL
+    // clients that hard-cap at 5.x; the real version + `-MariaDB` suffix
+    // sits in the second segment (`5.5.5-10.11.7-MariaDB-…`), so a
+    // case-insensitive substring check on the greeting is enough.
     let mut buf = [0u8; 256];
     let n = s.read(&mut buf).await?;
     if n < 6 {
@@ -114,8 +123,16 @@ async fn mysql(mut s: TcpStream) -> std::io::Result<(&'static str, Option<String
     let vs = &buf[payload_start + 1..n];
     let end = vs.iter().position(|b| *b == 0).unwrap_or(vs.len());
     let version = std::str::from_utf8(&vs[..end]).ok().map(|v| v.to_string());
-    trace!(?version, "mysql greeting parsed");
-    Ok(("mysql", version))
+    let engine = classify_mysql_family(version.as_deref());
+    trace!(?version, engine, "mysql-family greeting parsed");
+    Ok((engine, version))
+}
+
+fn classify_mysql_family(version: Option<&str>) -> &'static str {
+    match version {
+        Some(v) if v.to_ascii_lowercase().contains("mariadb") => "mariadb",
+        _ => "mysql",
+    }
 }
 
 async fn mssql(mut s: TcpStream) -> std::io::Result<(&'static str, Option<String>)> {
@@ -452,4 +469,32 @@ fn read_string(cur: &mut std::io::Cursor<&[u8]>) -> std::io::Result<String> {
     std::io::Read::read_exact(cur, &mut buf)?;
     String::from_utf8(buf)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::classify_mysql_family;
+
+    #[test]
+    fn mariadb_greeting_disambiguates() {
+        // Real 10.11 greeting shape: leading `5.5.5-` compat prefix, then the
+        // actual version + `-MariaDB-<suffix>`.
+        assert_eq!(
+            classify_mysql_family(Some("5.5.5-10.11.7-MariaDB-1:10.11.7+maria~ubu2204")),
+            "mariadb",
+        );
+        assert_eq!(classify_mysql_family(Some("10.4.28-MariaDB")), "mariadb");
+    }
+
+    #[test]
+    fn mysql_greeting_stays_mysql() {
+        assert_eq!(classify_mysql_family(Some("8.0.34")), "mysql");
+        assert_eq!(classify_mysql_family(Some("5.7.42-log")), "mysql");
+    }
+
+    #[test]
+    fn empty_greeting_falls_back_to_mysql() {
+        assert_eq!(classify_mysql_family(None), "mysql");
+        assert_eq!(classify_mysql_family(Some("")), "mysql");
+    }
 }

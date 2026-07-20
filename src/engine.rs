@@ -20,6 +20,14 @@ pub enum Engine {
     BigQuery,
     MsSql { version: SemVer },
     MySQL { version: SemVer },
+    /// MariaDB. Mirrors the backend `Engine::Sql(SqlEngine::MariaDB)` variant
+    /// so the two crates round-trip the same JSON. Not used for connection
+    /// dispatch (that goes through `ConnectionParams`); kept for metadata
+    /// completeness and future version-conditional logic.
+    MariaDB { version: SemVer },
+    /// SQLite is compile-only for now; kept here so the tunnel can round-trip
+    /// engine metadata even though it never opens a SQLite connection.
+    SQLite { version: SemVer },
     Mongo { version: SemVer },
     D2 {
         #[serde(default = "default_d2_version")]
@@ -163,6 +171,20 @@ mod tests {
     }
 
     #[test]
+    fn engine_mariadb() {
+        let json = serde_json::json!({"type": "mariadb", "version": "10.11.0"});
+        let e: Engine = serde_json::from_value(json).unwrap();
+        assert!(matches!(e, Engine::MariaDB { .. }));
+    }
+
+    #[test]
+    fn engine_sqlite() {
+        let json = serde_json::json!({"type": "sqlite", "version": "3.45.0"});
+        let e: Engine = serde_json::from_value(json).unwrap();
+        assert!(matches!(e, Engine::SQLite { .. }));
+    }
+
+    #[test]
     fn engine_clickhouse() {
         let json = serde_json::json!({"type": "clickhouse", "version": "24.0.0"});
         let e: Engine = serde_json::from_value(json).unwrap();
@@ -233,6 +255,8 @@ mod tests {
             serde_json::json!({"type": "bigquery"}),
             serde_json::json!({"type": "mssql", "version": "16.0.0"}),
             serde_json::json!({"type": "mysql", "version": "8.0.0"}),
+            serde_json::json!({"type": "mariadb", "version": "10.11.0"}),
+            serde_json::json!({"type": "sqlite", "version": "3.45.0"}),
             serde_json::json!({"type": "mongo", "version": "7.0.0"}),
             serde_json::json!({"type": "d2", "version": "0.6.0", "direction": "down"}),
         ];

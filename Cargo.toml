@@ -49,12 +49,17 @@ cargo-dist-version = "0.21.1"
 # CI backends to support
 ci = "github"
 # The installers to generate for each app
-installers = ["shell"]
-# Target platforms to build apps for (Rust target-triple syntax)
+installers = ["shell", "powershell"]
+# Target platforms to build apps for (Rust target-triple syntax).
+# `x86_64-pc-windows-msvc` is here so operators can run the tunnel next to
+# an on-prem SQL Server, which is overwhelmingly Windows-hosted. Discovery
+# hints that rely on `/proc` and `/etc/resolv.conf` degrade to empty on
+# Windows (see `src/discovery/hints.rs`); everything else works.
 targets = [
     "aarch64-apple-darwin",
     "x86_64-apple-darwin",
     "x86_64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
 ]
 # Path that installers should place binaries in
 install-path = "CARGO_HOME"
@@ -67,6 +72,7 @@ allow-dirty = ["ci"]
 aarch64-apple-darwin = "macos-latest"
 x86_64-apple-darwin = "macos-latest"
 x86_64-unknown-linux-gnu = "ubuntu-latest"
+x86_64-pc-windows-msvc = "windows-latest"
 
 [package.metadata.dist]
 dist = true

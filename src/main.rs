@@ -6,9 +6,18 @@ mod error;
 mod params;
 mod query;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use tracing::{info, warn};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
+
+#[derive(Copy, Clone, Debug, ValueEnum)]
+enum LogFormat {
+    /// Single-line human-readable output. Colors on when the console
+    /// supports them.
+    Compact,
+    /// One JSON object per event, for log collectors and services.
+    Json,
+}
 
 #[derive(Parser)]
 #[command(name = "kaiwadb-tunnel")]
@@ -27,20 +36,31 @@ struct Args {
     /// the server is answered with an error.
     #[arg(long, env = "KAIWADB_TUNNEL_DISABLE_SCAN")]
     no_scan: bool,
+
+    /// Log output format.
+    #[arg(long, env = "KAIWADB_TUNNEL_LOG_FORMAT", value_enum, default_value_t = LogFormat::Compact)]
+    log_format: LogFormat,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), error::TunnelError> {
+    let args = Args::parse();
+
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let registry = tracing_subscriber::registry().with(filter);
 
-    if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
-        registry.with(fmt::layer().pretty()).init();
-    } else {
-        registry.with(fmt::layer().json()).init();
-    }
+    // ANSI is on only when stdout is a real terminal AND the OS console can
+    // render escapes. On Windows the crate flips the VT processing bit via
+    // SetConsoleMode; on other platforms it is a no-op that returns Ok.
+    let ansi = std::io::IsTerminal::is_terminal(&std::io::stdout())
+        && enable_ansi_support::enable_ansi_support().is_ok();
 
-    let args = Args::parse();
+    match args.log_format {
+        LogFormat::Compact => registry
+            .with(fmt::layer().compact().with_ansi(ansi))
+            .init(),
+        LogFormat::Json => registry.with(fmt::layer().json()).init(),
+    }
 
     info!(uri = %args.uri, no_scan = args.no_scan, "starting kaiwadb tunnel");
 

@@ -1,6 +1,6 @@
 [package]
 name = "kaiwadb-tunnel"
-version = "0.10.2"
+version = "0.11.0"
 edition = "2024"
 repository = "https://github.com/kaiwadb/tunnel"
 license-file = "LICENSE"
@@ -28,6 +28,7 @@ tokio-tungstenite = { version = "0.27.0", features = ["native-tls"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+enable-ansi-support = "0.3"
 percent-encoding = "2"
 url = "2"
 if-addrs = "0.13"

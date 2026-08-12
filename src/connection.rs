@@ -8,12 +8,15 @@
 //!   interleave their chunks safely.
 //! - A single writer task drains the shared mpsc into the WebSocket sink
 //!   so concurrent handlers don't race on writes.
-//! - Reconnect uses exponential backoff capped at [`MAX_RECONNECT_DELAY`].
-//!   A 4001 close (server-side lease loss, e.g. another tunnel took over)
-//!   bypasses the normal backoff and waits [`EVICTION_BACKOFF`] before
-//!   trying again.
+//! - The tunnel is a long-running daemon. Only the operator (signal) can
+//!   stop it. Every disconnect reconnects. Handshake failures use
+//!   exponential backoff capped at [`MAX_RECONNECT_DELAY`]; a close after
+//!   a successful session resets to [`INITIAL_RECONNECT_DELAY`]. A 4001
+//!   close (server-side lease loss, e.g. another tunnel took over) waits
+//!   [`EVICTION_BACKOFF`] before trying again.
 
-use futures_util::{SinkExt, StreamExt, stream::SplitSink};
+use futures_util::{FutureExt, SinkExt, StreamExt, stream::SplitSink};
+use std::panic::AssertUnwindSafe;
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
@@ -52,9 +55,9 @@ pub async fn run(uri: String, token: String, no_scan: bool) -> Result<(), Tunnel
 
     loop {
         match connect_and_handle(request.clone(), no_scan).await {
-            Ok(SessionEnd::Normal) => {
-                info!("connection ended normally");
-                return Ok(());
+            Ok(SessionEnd::Reconnect) => {
+                info!("connection closed by server; reconnecting");
+                delay = INITIAL_RECONNECT_DELAY;
             }
             Ok(SessionEnd::Evicted) => {
                 warn!(
@@ -74,7 +77,11 @@ pub async fn run(uri: String, token: String, no_scan: bool) -> Result<(), Tunnel
 }
 
 enum SessionEnd {
-    Normal,
+    /// The session ended for a benign reason (server-initiated close, EOF,
+    /// missing frame). Reconnect without backoff.
+    Reconnect,
+    /// Server closed with the eviction code. Another tunnel took over the
+    /// lease. Wait [`EVICTION_BACKOFF`] before trying again.
     Evicted,
 }
 
@@ -96,6 +103,10 @@ async fn connect_and_handle(
     let mut heartbeat = interval(HEARTBEAT_PERIOD);
     heartbeat.tick().await; // consume immediate first tick
 
+    // Any post-connect failure returns SessionEnd::Reconnect. The initial
+    // handshake already succeeded, so there is no legitimate wire event
+    // that should terminate the process. Only the outer loop (on real
+    // handshake errors) applies backoff.
     let outcome = loop {
         tokio::select! {
             msg = read.next() => {
@@ -112,22 +123,30 @@ async fn connect_and_handle(
                     }
                     Some(Ok(Message::Ping(payload))) => {
                         if out_tx.send(Message::Pong(payload)).await.is_err() {
-                            break Err(TunnelError::Connection("writer channel closed".into()));
+                            warn!("writer channel closed; reconnecting");
+                            break SessionEnd::Reconnect;
                         }
                     }
                     Some(Ok(Message::Pong(_))) | Some(Ok(Message::Binary(_)))
                         | Some(Ok(Message::Frame(_))) => continue,
                     Some(Ok(Message::Close(frame))) => {
                         info!(?frame, "connection closed by server");
-                        break Ok(close_session_end(frame));
+                        break close_session_end(frame);
                     }
-                    Some(Err(e)) => break Err(e.into()),
-                    None => break Err(TunnelError::Connection("connection closed unexpectedly".into())),
+                    Some(Err(e)) => {
+                        warn!(error = %e, "read error; reconnecting");
+                        break SessionEnd::Reconnect;
+                    }
+                    None => {
+                        warn!("connection closed unexpectedly; reconnecting");
+                        break SessionEnd::Reconnect;
+                    }
                 }
             }
             _ = heartbeat.tick() => {
                 if out_tx.send(Message::Ping("heartbeat".into())).await.is_err() {
-                    break Err(TunnelError::Connection("writer channel closed".into()));
+                    warn!("writer channel closed; reconnecting");
+                    break SessionEnd::Reconnect;
                 }
             }
         }
@@ -138,13 +157,13 @@ async fn connect_and_handle(
     if let Err(e) = writer_task.await {
         warn!(error = %e, "writer task panicked");
     }
-    outcome
+    Ok(outcome)
 }
 
 fn close_session_end(frame: Option<CloseFrame>) -> SessionEnd {
     match frame {
         Some(f) if u16::from(f.code) == CLOSE_CODE_EVICTED => SessionEnd::Evicted,
-        _ => SessionEnd::Normal,
+        _ => SessionEnd::Reconnect,
     }
 }
 
@@ -161,33 +180,55 @@ async fn writer_loop(mut write: WsSink, mut rx: mpsc::Receiver<Message>) {
 fn spawn_handler(msg: ServerMessage, out_tx: mpsc::Sender<Message>, no_scan: bool) {
     tokio::spawn(async move {
         let ServerMessage::Command { id, request } = msg;
-        // begin
         send_control(&out_tx, &TunnelControl::Begin { id }).await;
 
-        let result = match request {
-            ServerCommand::Query(query) => query.execute_streaming(id, &out_tx).await,
-            ServerCommand::Scan(req) => {
-                if no_scan {
-                    info!(cmd_id = id, "rejecting scan: disabled by operator");
-                    Err(crate::error::TunnelError::Connection(
-                        "scan disabled by operator".into(),
-                    ))
-                } else {
-                    let report = discovery::scan(req).await;
-                    stream_serializable(&report, id, &out_tx).await
+        // Catch panics from driver code (e.g. an unexpected row shape in a
+        // DB driver) so the server always sees a matching End frame instead
+        // of hanging on a silently-dead task.
+        let driver = AssertUnwindSafe(async {
+            match request {
+                ServerCommand::Query(query) => query.execute_streaming(id, &out_tx).await,
+                ServerCommand::Scan(req) => {
+                    if no_scan {
+                        info!(cmd_id = id, "rejecting scan: disabled by operator");
+                        Err(crate::error::TunnelError::Connection(
+                            "scan disabled by operator".into(),
+                        ))
+                    } else {
+                        let report = discovery::scan(req).await;
+                        stream_serializable(&report, id, &out_tx).await
+                    }
                 }
             }
-        };
+        });
 
-        let end = match result {
-            Ok(()) => TunnelControl::End { id, error: None },
-            Err(e) => TunnelControl::End {
+        let end = match driver.catch_unwind().await {
+            Ok(Ok(())) => TunnelControl::End { id, error: None },
+            Ok(Err(e)) => TunnelControl::End {
                 id,
                 error: Some(e.to_string()),
             },
+            Err(panic) => {
+                let msg = panic_message(&*panic);
+                error!(cmd_id = id, panic = %msg, "handler panicked");
+                TunnelControl::End {
+                    id,
+                    error: Some(format!("internal tunnel error: {msg}")),
+                }
+            }
         };
         send_control(&out_tx, &end).await;
     });
+}
+
+fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = panic.downcast_ref::<&'static str>() {
+        (*s).to_string()
+    } else if let Some(s) = panic.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic payload".to_string()
+    }
 }
 
 async fn send_control(out_tx: &mpsc::Sender<Message>, ctrl: &TunnelControl) {

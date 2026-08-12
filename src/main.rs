@@ -7,7 +7,7 @@ mod params;
 mod query;
 
 use clap::Parser;
-use tracing::info;
+use tracing::{info, warn};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 #[derive(Parser)]
@@ -43,5 +43,39 @@ async fn main() -> Result<(), error::TunnelError> {
     let args = Args::parse();
 
     info!(uri = %args.uri, no_scan = args.no_scan, "starting kaiwadb tunnel");
-    connection::run(args.uri, args.token, args.no_scan).await
+
+    tokio::select! {
+        result = connection::run(args.uri, args.token, args.no_scan) => result,
+        _ = shutdown_signal() => {
+            info!("shutdown signal received; exiting");
+            Ok(())
+        }
+    }
+}
+
+/// Resolves when the process receives Ctrl-C, or (on unix) SIGTERM.
+/// Dropping the connection future is safe: the WebSocket writer task
+/// drains any queued frames on sender drop, and tokio-tungstenite
+/// closes the socket on sink drop.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut term = match signal(SignalKind::terminate()) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(error = %e, "failed to install SIGTERM handler; relying on Ctrl-C only");
+                let _ = tokio::signal::ctrl_c().await;
+                return;
+            }
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }

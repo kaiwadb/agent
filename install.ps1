@@ -10,5 +10,7 @@
 # Usage: powershell -c "irm https://raw.githubusercontent.com/kaiwadb/tunnel/main/install.ps1 | iex"
 
 $ErrorActionPreference = 'Stop'
+# cargo-dist installer self-checks Get-ExecutionPolicy; lift it for this process only.
+Set-ExecutionPolicy Bypass -Scope Process -Force
 $url = 'https://github.com/kaiwadb/tunnel/releases/latest/download/kaiwadb-tunnel-installer.ps1'
 Invoke-Expression ((New-Object System.Net.WebClient).DownloadString($url))
